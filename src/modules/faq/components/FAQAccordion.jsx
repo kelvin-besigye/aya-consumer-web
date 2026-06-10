@@ -1,0 +1,52 @@
+import React from 'react';
+
+const FAQAccordion = ({ faq, isOpen, onToggle }) => {
+  return (
+      <div style={{ 
+            borderBottom: '1px solid var(--border-subtle)', 
+                  overflow: 'hidden'
+                      }}>
+                            <button 
+                                    onClick={onToggle}
+                                            style={{ 
+                                                      width: '100%', display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                                                                padding: '20px 0', background: 'none', border: 'none', cursor: 'pointer',
+                                                                          textAlign: 'left', color: isOpen ? 'var(--brand-primary)' : 'var(--text-main)',
+                                                                                    transition: 'color var(--duration-fast)'
+                                                                                            }}
+                                                                                                  >
+                                                                                                          <span style={{ fontSize: '15px', fontWeight: '800', lineHeight: '1.4', paddingRight: '16px' }}>
+                                                                                                                    {faq.question}
+                                                                                                                            </span>
+                                                                                                                                    <svg 
+                                                                                                                                              style={{ 
+                                                                                                                                                          transform: isOpen ? 'rotate(180deg)' : 'rotate(0deg)', 
+                                                                                                                                                                      transition: 'transform var(--duration-normal) var(--ease-main)',
+                                                                                                                                                                                  minWidth: '20px'
+                                                                                                                                                                                            }} 
+                                                                                                                                                                                                      width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+                                                                                                                                                                                                              >
+                                                                                                                                                                                                                        <polyline points="6 9 12 15 18 9"></polyline>
+                                                                                                                                                                                                                                </svg>
+                                                                                                                                                                                                                                      </button>
+
+                                                                                                                                                                                                                                            {/* Hardware Accelerated Height Animation using CSS Grid */}
+                                                                                                                                                                                                                                                  <div style={{ 
+                                                                                                                                                                                                                                                          display: 'grid', 
+                                                                                                                                                                                                                                                                  gridTemplateRows: isOpen ? '1fr' : '0fr',
+                                                                                                                                                                                                                                                                          transition: 'grid-template-rows var(--duration-normal) var(--ease-main)'
+                                                                                                                                                                                                                                                                                }}>
+                                                                                                                                                                                                                                                                                        <div style={{ overflow: 'hidden' }}>
+                                                                                                                                                                                                                                                                                                  <p style={{ 
+                                                                                                                                                                                                                                                                                                              margin: '0 0 20px 0', fontSize: '14px', color: 'var(--text-muted)', lineHeight: '1.6', 
+                                                                                                                                                                                                                                                                                                                          opacity: isOpen ? 1 : 0, transition: 'opacity var(--duration-normal) var(--ease-main)' 
+                                                                                                                                                                                                                                                                                                                                    }}>
+                                                                                                                                                                                                                                                                                                                                                {faq.answer}
+                                                                                                                                                                                                                                                                                                                                                          </p>
+                                                                                                                                                                                                                                                                                                                                                                  </div>
+                                                                                                                                                                                                                                                                                                                                                                        </div>
+                                                                                                                                                                                                                                                                                                                                                                            </div>
+                                                                                                                                                                                                                                                                                                                                                                              );
+                                                                                                                                                                                                                                                                                                                                                                              };
+
+                                                                                                                                                                                                                                                                                                                                                                              export default FAQAccordion;
