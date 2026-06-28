@@ -3,18 +3,32 @@
  * ------------------------------------------------------------------
  * Module: Booking Funnel (Phase 1)
  * File: services/booking.mutations.js
- * * * WORLD-CLASS ENGINEERING (African Physics):
- * 1. ATOMIC TRANSACTIONS: Uses Supabase RPCs (Remote Procedure Calls) or strict 
- * upserts to ensure that if a user's connection drops right as they pay, 
- * the seat is still secured and not double-booked.
- * 2. GRACEFUL FAILURES: Returns sanitized, user-friendly error messages that 
- * the UI can display directly without exposing backend stack traces.
- * 3. 1-CLICK MOMO REFUNDS: Contains the dedicated mutation pathway for the 
- * weaponized trust signal—instant cancellations.
+ * Goes to: apps/consumer-web/src/services/booking.mutations.js
+ *
+ * CHANGES IN THIS VERSION:
+ * - Added generatePNR() → produces codes like "AYA-LK3M9QR2-X7P"
+ * - pnr_code included in insert payload
+ * - select() now fetches id, ticket_token AND pnr_code back from DB
+ * - Return value includes pnrCode alongside bookingId and ticketToken
+ * - refund_status RESTORED in processCancellation (column added via SQL)
  */
 
 import { supabase } from '../../../lib/supabase';
 import { telemetryService } from './telemetry.service';
+
+// ========================================================================
+// 0. PNR GENERATOR (Passenger Name Record — The Boarding Pass Identity)
+// ========================================================================
+/**
+ * Generates a unique, human-readable booking reference.
+ * Format: AYA-{timestamp-base36}-{random-suffix}
+ * Example: AYA-LK3M9QR2-X7P
+ */
+const generatePNR = () => {
+  const timestamp = Date.now().toString(36).toUpperCase();
+  const suffix = Math.random().toString(36).substring(2, 5).toUpperCase();
+  return `AYA-${timestamp}-${suffix}`;
+};
 
 export const bookingMutations = {
 
@@ -37,26 +51,32 @@ export const bookingMutations = {
       // 1. Telemetry: Log the exact moment the mutation fires
       telemetryService.logFunnelStep('checkout_mutation_start', { scheduleId, seatCount: seatNumbers.length });
 
-      // 2. The Insertion Payload
+      // 2. Generate the PNR before insertion
+      // This must happen client-side so ticket_engine.js can reference it
+      // immediately — before the DB round-trip completes.
+      const pnr = generatePNR();
+
+      // 3. The Insertion Payload
       const bookingRecord = {
         schedule_id: scheduleId,
-        user_phone: passengerInfo.phone, // Primary identifier for B2C users
+        user_phone: passengerInfo.phone,       // Primary identifier for B2C users
         passenger_name: passengerInfo.fullName,
         next_of_kin_phone: passengerInfo.nextOfKin || null,
         seat_allocation: seatNumbers,
         total_amount: totalPaid,
         payment_ref: paymentReference,
-        status: 'CONFIRMED', // Options: PENDING, CONFIRMED, CANCELLED
+        pnr_code: pnr,                         // Unique boarding pass reference
+        status: 'CONFIRMED',                   // Options: PENDING, CONFIRMED, CANCELLED
         booked_at: new Date().toISOString()
       };
 
-      // 3. Execute the Database Write
+      // 4. Execute the Database Write
       // NOTE: In a strictly constrained environment, this is ideally an RPC call
       // to ensure seat availability is checked at the exact millisecond of insertion.
       const { data, error } = await supabase
         .from('user_bookings')
         .insert(bookingRecord)
-        .select('id, ticket_token')
+        .select('id, ticket_token, pnr_code')  // Fetch all three back to confirm storage
         .single();
 
       if (error) {
@@ -65,13 +85,14 @@ export const bookingMutations = {
         throw error;
       }
 
-      // 4. Telemetry: Log success
+      // 5. Telemetry: Log success
       telemetryService.logConversion(data.id, totalPaid);
 
       return {
         success: true,
         bookingId: data.id,
-        ticketToken: data.ticket_token // Used by ticket.engine.js to generate the QR
+        pnrCode: data.pnr_code,               // Used by ticket_engine.js for QR and boarding pass label
+        ticketToken: data.ticket_token         // Used by ticket_engine.js to generate the QR secondary hash
       };
 
     } catch (error) {
@@ -85,7 +106,7 @@ export const bookingMutations = {
   // 2. THE TRUST ENGINE (1-Click MoMo Refunds)
   // ========================================================================
   /**
-   * Processes a user-initiated cancellation. Updates the booking status 
+   * Processes a user-initiated cancellation. Updates the booking status
    * and flags it for the automated MoMo refund disbursement queue.
    * @param {string} bookingId - The unique ID of the booking.
    * @param {string} phone - Verification to ensure the right person is cancelling.
@@ -95,14 +116,15 @@ export const bookingMutations = {
       telemetryService.logFunnelStep('cancellation_initiated', { bookingId });
 
       // 1. Verify and Update Status
+      // NOTE: refund_status column exists (added via SQL migration).
       const { data, error } = await supabase
         .from('user_bookings')
-        .update({ 
+        .update({
           status: 'CANCELLED',
-          refund_status: 'PROCESSING_MOMO'
+          refund_status: 'PROCESSING_MOMO'     // Flags this for the MoMo disbursement queue
         })
         .eq('id', bookingId)
-        .eq('user_phone', phone) // Security constraint
+        .eq('user_phone', phone)               // Security constraint: only the booker can cancel
         .select('total_amount')
         .single();
 
@@ -110,9 +132,9 @@ export const bookingMutations = {
 
       telemetryService.logFunnelStep('cancellation_successful', { bookingId, amount: data.total_amount });
 
-      return { 
-        success: true, 
-        message: 'Ticket cancelled. MoMo refund initiated to your registered number.' 
+      return {
+        success: true,
+        message: 'Ticket cancelled. MoMo refund initiated to your registered number.'
       };
 
     } catch (error) {

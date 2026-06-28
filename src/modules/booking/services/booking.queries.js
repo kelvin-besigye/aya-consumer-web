@@ -2,23 +2,26 @@
  * 🌍 AYABUS CONSUMER WEB (The Query Engine)
  * ------------------------------------------------------------------
  * File: services/booking.queries.js
+ * Goes to: apps/consumer-web/src/services/booking.queries.js
  *
- * ARCHITECTURE NOTES v3 (Bug Fix):
- * - REMOVED embedded PostgREST selects (e.g. `partners ( ... )`).
- *   They break when both `routes.partner_id` and `bus_configs.partner_id`
- *   exist because PostgREST chokes on the relationship ambiguity and
- *   emits "column bus_configs_1.capacity does not exist".
- * - Now we fetch the parent row, then batch-load related tables in JS
- *   with `.in('id', [...])` calls. Output shape is preserved so the
- *   rest of the funnel works without further changes.
+ * CHANGES IN THIS VERSION:
+ * - Fixed STORAGE_BUCKET from 'partner-assets' → 'aya-bus-media' (per architecture docs)
+ * - Fixed saveBooking: no longer does a raw insert with wrong column names.
+ *   Now delegates to bookingMutations.secureBooking() which:
+ *     • generates the PNR
+ *     • uses the correct column names (user_phone, passenger_name, seat_allocation etc.)
+ *     • writes pnr_code, refund_status, ticket_token — all confirmed in schema
+ *   saveBooking still writes to user_passenger_manifest for seat-level tracking.
+ * - All other functions (searchAvailableRoutes, fetchAllCities, getRouteDetails) unchanged.
  */
 
 import { supabase } from '../../../lib/supabase';
+import { bookingMutations } from './booking.mutations';
 
-const STORAGE_BUCKET = 'partner-assets';
+const STORAGE_BUCKET = 'aya-bus-media'; // FIX: was 'partner-assets'
 
 // ---------------------------------------------------------------------------
-// CONSOLE HELPERS (unchanged)
+// CONSOLE HELPERS
 // ---------------------------------------------------------------------------
 
 export const testConnection = async () => {
@@ -65,29 +68,21 @@ export const diagnoseRLS = async () => {
 };
 
 // ---------------------------------------------------------------------------
-// INTERNAL RESOLVER: Confirmed Ticket Traversal Engine (unchanged)
+// INTERNAL RESOLVER: Confirmed Ticket Traversal Engine
 // ---------------------------------------------------------------------------
 const fetchConfirmedTicketCounts = async (scheduleIds) => {
-  const tableCandidates = ['user_bookings', 'tickets', 'bookings'];
+  const { data, error } = await supabase
+    .from('user_passenger_manifest')
+    .select('id, schedule_id, seat_id, boarded_status')
+    .in('schedule_id', scheduleIds);
 
-  for (const table of tableCandidates) {
-    const { data, error } = await supabase
-      .from(table)
-      .select('id, schedule_id, status')
-      .in('schedule_id', scheduleIds);
-
-    if (!error) {
-      const confirmedTickets = (data || []).filter(ticket =>
-        ticket.status && ticket.status.toUpperCase() === 'CONFIRMED'
-      );
-      console.log(`[AyaBus Engine] Ticket record counts read from target table "${table}":`, confirmedTickets.length);
-      return confirmedTickets;
-    }
-    if (error.code !== '42P01') {
-      console.warn(`[AyaBus Engine] Secondary tracking fetch query on "${table}" rejected:`, error.message);
-    }
+  if (error) {
+    console.warn('[AyaBus Engine] user_passenger_manifest seat-count fetch rejected:', error.message);
+    return [];
   }
-  return [];
+
+  console.log('[AyaBus Engine] Booked seat rows found:', (data || []).length);
+  return data || [];
 };
 
 // ---------------------------------------------------------------------------
@@ -104,22 +99,22 @@ export const bookingQueries = {
   // ==========================================================================
   searchAvailableRoutes: async (paramOrOrigin, maybeDestination, maybeDate) => {
     try {
-      // ---- 1. PARAMETER NORMALIZATION --------------------------------------
+      // ---- 1. PARAMETER NORMALIZATION ----------------------------------------
       let origin = '';
       let destination = '';
       let date = '';
       let passengers = 1;
 
       if (typeof paramOrOrigin === 'object' && paramOrOrigin !== null) {
-        origin = (paramOrOrigin.origin || '').trim();
+        origin      = (paramOrOrigin.origin || '').trim();
         destination = (paramOrOrigin.destination || '').trim();
-        date = paramOrOrigin.date || paramOrOrigin.travelDate || '';
-        passengers = paramOrOrigin.passengers || 1;
+        date        = paramOrOrigin.date || paramOrOrigin.travelDate || '';
+        passengers  = paramOrOrigin.passengers || 1;
       } else {
-        origin = (paramOrOrigin || '').trim();
+        origin      = (paramOrOrigin || '').trim();
         destination = (maybeDestination || '').trim();
-        date = maybeDate || '';
-        passengers = 1;
+        date        = maybeDate || '';
+        passengers  = 1;
       }
 
       console.log('[AyaBus Engine] Resolving network search query metrics:', { origin, destination, date, passengers });
@@ -129,7 +124,7 @@ export const bookingQueries = {
         return { success: false, error: 'Mandatory search parameters missing or undefined.', data: [] };
       }
 
-      // ---- 2. ROUTES — parent only, no embeds -------------------------------
+      // ---- 2. ROUTES — parent only, no embeds --------------------------------
       const { data: routeData, error: routeError } = await supabase
         .from('routes')
         .select(`
@@ -169,17 +164,17 @@ export const bookingQueries = {
         return { success: true, data: [] };
       }
 
-      // ---- 3. BATCHED RELATIONSHIP FETCHES (no joins) ------------------------
-      const routeIds       = activeRoutes.map(r => r.id);
-      const partnerIds     = [...new Set(activeRoutes.map(r => r.partner_id).filter(Boolean))];
-      const busConfigIds   = [...new Set(activeRoutes.map(r => r.bus_config_id).filter(Boolean))];
+      // ---- 3. BATCHED RELATIONSHIP FETCHES (no joins) -------------------------
+      const routeIds     = activeRoutes.map(r => r.id);
+      const partnerIds   = [...new Set(activeRoutes.map(r => r.partner_id).filter(Boolean))];
+      const busConfigIds = [...new Set(activeRoutes.map(r => r.bus_config_id).filter(Boolean))];
 
       const [partnersRes, busConfigsRes, schedulesRes] = await Promise.all([
         partnerIds.length > 0
           ? supabase.from('partners').select('id, company_name, status').in('id', partnerIds)
           : Promise.resolve({ data: [], error: null }),
         busConfigIds.length > 0
-          ? supabase.from('bus_configs').select('id, bus_class, capacity, amenities, gallery').in('id', busConfigIds)
+          ? supabase.from('bus_configs').select('id, bus_class, capacity, amenities, gallery, layout_config').in('id', busConfigIds)
           : Promise.resolve({ data: [], error: null }),
         supabase.from('route_schedules').select('id, route_id, frequency_type, frequency_data, status').in('route_id', routeIds),
       ]);
@@ -202,7 +197,7 @@ export const bookingQueries = {
       const busConfigMap = Object.fromEntries((busConfigsRes.data || []).map(b => [b.id, b]));
       const routeMap     = Object.fromEntries(activeRoutes.map(r => [r.id, r]));
 
-      // ---- 4. SCHEDULE FILTERING -------------------------------------------
+      // ---- 4. SCHEDULE FILTERING ----------------------------------------------
       const activeSchedules = (schedulesRes.data || []).filter(s => s.status && s.status.toUpperCase() === 'ACTIVE');
       console.log('[AyaBus Engine] Target structural route schedules established:', activeSchedules.length);
 
@@ -211,8 +206,8 @@ export const bookingQueries = {
         return { success: true, data: [] };
       }
 
-      const requestedDate = new Date(date);
-      const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+      const requestedDate    = new Date(date);
+      const dayNames         = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
       const requestedDayName = dayNames[requestedDate.getDay()];
 
       const validSchedules = activeSchedules.filter(sched => {
@@ -236,8 +231,8 @@ export const bookingQueries = {
         return { success: true, data: [] };
       }
 
-      // ---- 5. TICKET INVENTORY ---------------------------------------------
-      const scheduleIds = validSchedules.map(s => s.id);
+      // ---- 5. TICKET INVENTORY ------------------------------------------------
+      const scheduleIds  = validSchedules.map(s => s.id);
       const ticketRecords = await fetchConfirmedTicketCounts(scheduleIds);
 
       const ticketCountBySchedule = {};
@@ -247,39 +242,57 @@ export const bookingQueries = {
         }
       });
 
-      // ---- 6. OUTPUT NORMALIZATION (stitched in JS, same shape as before) ---
+      // ---- 6. OUTPUT NORMALIZATION (stitched in JS) ---------------------------
       const formattedResults = validSchedules.map((schedule) => {
-        const route     = routeMap[schedule.route_id] || {};
-        const partner   = partnerMap[route.partner_id] || {};
+        const route     = routeMap[schedule.route_id]   || {};
+        const partner   = partnerMap[route.partner_id]  || {};
         const busConfig = busConfigMap[route.bus_config_id] || {};
 
-        const price          = route.price_ticket || 0;
-        const totalCapacity  = busConfig.capacity || 45;
-        const ticketsSold    = ticketCountBySchedule[schedule.id] || 0;
-        const seatsLeft      = Math.max(0, totalCapacity - ticketsSold);
+        const price         = route.price_ticket || 0;
+        const totalCapacity = busConfig.capacity || 45;
+        const ticketsSold   = ticketCountBySchedule[schedule.id] || 0;
+        const seatsLeft     = Math.max(0, totalCapacity - ticketsSold);
 
         return {
+          id:         schedule.id,
           scheduleId: schedule.id,
-          routeId: route.id,
-          partnerId: route.partner_id,
+          routeId:    route.id,
+          partnerId:  route.partner_id,
 
-          companyName:    partner.company_name || 'AyaBus Transit Operator',
-          rating:         4.8,
-          busClass:       busConfig.bus_class || 'Standard Executive',
-          amenities:      busConfig.amenities || [],
+          partner_name:   partner.company_name || 'AyaBus Transit Operator',
+          partner_logo:   null,
+          partner_rating: 4.8,
 
-          departureTime:   route.departure_time,
-          arrivalTime:     null,
-          price,
-          priceTax:        route.price_tax || 0,
-          boardingLocation: route.departure_park || 'Main Transit Terminal',
-          origin:          route.origin_city,
-          destination:     route.destination_city,
+          class_name:    busConfig.bus_class || 'Standard Executive',
+          busClass:      busConfig.bus_class || 'Standard Executive',
+          amenities:     busConfig.amenities || [],
+          capacity:      totalCapacity,
+          layout_config: busConfig.layout_config || { cols_left: 2, cols_right: 2, total_rows: 11, has_rear_bench: false, driver_position: 'RIGHT' },
+
+          departure_time: route.departure_time,
+          departureTime:  route.departure_time,
+          arrival_time:   null,
+          duration: (route.duration_hours || route.duration_minutes)
+            ? `${route.duration_hours || 0}h ${route.duration_minutes || 0}m`
+            : 'TBD',
           durationHours:   route.duration_hours,
           durationMinutes: route.duration_minutes,
-          routeCode:       route.route_code,
-          frequencyType:   schedule.frequency_type,
 
+          price,
+          priceTax: route.price_tax || 0,
+
+          origin_park:      route.departure_park || 'Main Transit Terminal',
+          destination_park: null,
+          origin:           route.origin_city,
+          destination:      route.destination_city,
+          gps_lat: null,
+          gps_lng: null,
+
+          routeCode:     route.route_code,
+          frequencyType: schedule.frequency_type,
+          is_sweetspot:  false,
+
+          remaining_seats: seatsLeft,
           totalCapacity,
           seatsLeft,
 
@@ -310,7 +323,7 @@ export const bookingQueries = {
   },
 
   // ==========================================================================
-  // AUTOFILL & CITY REGISTRY SYNC (unchanged)
+  // AUTOFILL & CITY REGISTRY SYNC
   // ==========================================================================
   fetchAllCities: async () => {
     try {
@@ -336,11 +349,10 @@ export const bookingQueries = {
   },
 
   // ==========================================================================
-  // VIEW HOOKS: SPECIFIC SCHEDULE DEEP LOOKUP (also de-embedded)
+  // VIEW HOOKS: SPECIFIC SCHEDULE DEEP LOOKUP
   // ==========================================================================
   getRouteDetails: async (scheduleId) => {
     try {
-      // Stage 1: schedule
       const { data: schedule, error: scheduleError } = await supabase
         .from('route_schedules')
         .select('id, route_id, frequency_type, frequency_data')
@@ -349,7 +361,6 @@ export const bookingQueries = {
 
       if (scheduleError) throw scheduleError;
 
-      // Stage 2: route
       const { data: route, error: routeError } = await supabase
         .from('routes')
         .select('id, route_code, departure_park, bus_config_id')
@@ -358,7 +369,6 @@ export const bookingQueries = {
 
       if (routeError) throw routeError;
 
-      // Stage 3: bus config (only if FK is set)
       let busConfig = {};
       if (route.bus_config_id) {
         const { data: bc, error: bcError } = await supabase
@@ -378,6 +388,7 @@ export const bookingQueries = {
           busClass:      busConfig.bus_class  || 'Standard Express',
           routeCode:     route.route_code,
           boardingPark:  route.departure_park,
+          gallery:       (busConfig.gallery || []).map(img => bookingQueries.resolveImageUrl(img)),
         }
       };
     } catch (error) {
@@ -386,8 +397,88 @@ export const bookingQueries = {
     }
   },
 
+  fetchRouteDetails: async (scheduleId) => {
+    return bookingQueries.getRouteDetails(scheduleId);
+  },
+
   // ==========================================================================
-  // STATIC ASSET ENGINE (unchanged)
+  // STEP 4: PERSIST THE COMPLETED BOOKING
+  // FIX: No longer does a raw insert with incorrect column names.
+  // Now delegates to bookingMutations.secureBooking() for the parent row,
+  // then writes seat-level rows to user_passenger_manifest separately.
+  //
+  // @param {object} route     - selectedRoute (has routeId, scheduleId, partnerId, price)
+  // @param {object[]} manifest - [{ seatId, passengerName, activePhone, altContact, luggage }]
+  // @param {object} ticketData - from Step4_Checkout (paymentMethod, paymentReference, etc.)
+  // @param {number} totalPrice
+  // ==========================================================================
+  saveBooking: async (route, manifest, ticketData, totalPrice) => {
+    try {
+      if (!route?.routeId) throw new Error('Missing routeId on route — cannot save booking.');
+      if (!route?.scheduleId) throw new Error('Missing scheduleId on route — cannot save booking.');
+      if (!manifest || manifest.length === 0) throw new Error('Cannot save a booking with zero passengers/seats.');
+
+      // Use the first passenger as the primary booking holder
+      const primaryPassenger = manifest[0];
+
+      // 1. Delegate to bookingMutations.secureBooking() — this handles
+      //    PNR generation, correct column names, pnr_code, ticket_token, refund_status.
+      const bookingResult = await bookingMutations.secureBooking({
+        scheduleId:       route.scheduleId,
+        seatNumbers:      manifest.map(p => p.seatId),
+        passengerInfo: {
+          fullName:  primaryPassenger.passengerName || 'AyaBus Passenger',
+          phone:     primaryPassenger.activePhone   || ticketData?.phone || '',
+          nextOfKin: primaryPassenger.altContact    || null,
+        },
+        totalPaid:        totalPrice,
+        paymentReference: ticketData?.paymentReference || ticketData?.momoRef || `REF-${Date.now()}`,
+      });
+
+      if (!bookingResult.success) throw new Error(bookingResult.error);
+
+      const bookingId = bookingResult.bookingId;
+
+      // 2. Write one seat-level row per passenger into user_passenger_manifest
+      //    for real-time seat availability tracking on the next search.
+      const manifestRows = manifest.map((p) => ({
+        booking_id:           bookingId,
+        schedule_id:          route.scheduleId,
+        seat_id:              p.seatId,
+        passenger_name:       p.passengerName || 'AyaBus Passenger',
+        active_phone_number:  p.activePhone || '',
+        alternative_contact:  p.altContact || null,
+        special_luggage_info: p.luggage && p.luggage !== 'STANDARD' ? p.luggage : null,
+        boarded_status:       'PENDING',
+        qr_validation_hash:   `${bookingResult.pnrCode}-${p.seatId}-${Math.random().toString(36).substring(2, 10)}`,
+      }));
+
+      const { error: manifestError } = await supabase
+        .from('user_passenger_manifest')
+        .insert(manifestRows);
+
+      if (manifestError) {
+        // Non-fatal: booking row is already saved. Log and continue.
+        console.error('[AyaBus Engine] Manifest write failed (booking still confirmed):', manifestError.message);
+      }
+
+      console.log('[AyaBus Engine] Booking saved:', bookingId, 'PNR:', bookingResult.pnrCode, 'seats:', manifest.map(p => p.seatId));
+
+      return {
+        success:   true,
+        bookingId,
+        pnrCode:   bookingResult.pnrCode,
+        ticketToken: bookingResult.ticketToken,
+      };
+
+    } catch (error) {
+      console.error('[AyaBus Engine] saveBooking failed:', error.message);
+      return { success: false, error: error.message };
+    }
+  },
+
+  // ==========================================================================
+  // STATIC ASSET ENGINE
   // ==========================================================================
   resolveImageUrl: (imagePath) => {
     if (!imagePath) return '/assets/fallbacks/bus-placeholder.png';

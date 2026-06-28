@@ -22,6 +22,7 @@ import AppAdvertModule from '../modules/app-advert/AppAdvertModule';
 import AwardsModule from '../modules/awards/AwardsModule';
 import BigFooterModule from '../modules/big-footer/BigFooterModule';
 import BookingModule from '../modules/booking/BookingModule';
+import { bookingQueries } from '../modules/booking/services/booking.queries';
 import BusPartnersModule from '../modules/bus-partners/BusPartnersModule';
 import CustomerSupportModule from '../modules/customer-support/CustomerSupportModule';
 import FaqModule from '../modules/faq/FaqModule';
@@ -449,6 +450,77 @@ const HeroSection = ({ isDarkMode, onSearch, isSearching }) => {
     passengers: 1
   });
 
+  // --- CITY AUTOCOMPLETE ---
+  // Cities are fetched once and filtered client-side as the person types,
+  // rather than hitting Supabase on every keystroke (matters on weak 3G).
+  const [allCities, setAllCities] = useState([]);
+  const [activeSuggestionField, setActiveSuggestionField] = useState(null); // 'origin' | 'destination' | null
+  const [highlightedIndex, setHighlightedIndex] = useState(-1);
+  const originWrapperRef = useRef(null);
+  const destinationWrapperRef = useRef(null);
+
+  useEffect(() => {
+    let mounted = true;
+    bookingQueries.fetchAllCities().then((response) => {
+      if (mounted && response.success) {
+        setAllCities(response.data || []);
+      }
+    });
+    return () => { mounted = false; };
+  }, []);
+
+  // Close suggestions when clicking outside either input's wrapper
+  useEffect(() => {
+    const handleClickOutside = (e) => {
+      if (
+        originWrapperRef.current && !originWrapperRef.current.contains(e.target) &&
+        destinationWrapperRef.current && !destinationWrapperRef.current.contains(e.target)
+      ) {
+        setActiveSuggestionField(null);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  const getSuggestions = (field) => {
+    const typed = (searchData[field] || '').trim().toLowerCase();
+    if (!typed) return allCities.slice(0, 6); // show a short default list on focus
+    return allCities
+      .filter(city => city.toLowerCase().includes(typed))
+      .slice(0, 6);
+  };
+
+  const handleCityInputChange = (field, value) => {
+    setSearchData(prev => ({ ...prev, [field]: value }));
+    setActiveSuggestionField(field);
+    setHighlightedIndex(-1);
+  };
+
+  const handleSelectSuggestion = (field, city) => {
+    setSearchData(prev => ({ ...prev, [field]: city }));
+    setActiveSuggestionField(null);
+    setHighlightedIndex(-1);
+  };
+
+  const handleSuggestionKeyDown = (field, e) => {
+    const suggestions = getSuggestions(field);
+    if (activeSuggestionField !== field || suggestions.length === 0) return;
+
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      setHighlightedIndex(prev => (prev + 1) % suggestions.length);
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      setHighlightedIndex(prev => (prev - 1 + suggestions.length) % suggestions.length);
+    } else if (e.key === 'Enter' && highlightedIndex >= 0) {
+      e.preventDefault();
+      handleSelectSuggestion(field, suggestions[highlightedIndex]);
+    } else if (e.key === 'Escape') {
+      setActiveSuggestionField(null);
+    }
+  };
+
   const handleSearch = (e) => {
     if (e) e.preventDefault();
     if (isSearching) return; // ignore double-clicks
@@ -536,7 +608,7 @@ const HeroSection = ({ isDarkMode, onSearch, isSearching }) => {
               <label style={{ display: 'block', fontSize: '12px', fontWeight: '600', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '1px', marginBottom: '8px' }}>
                 From
               </label>
-              <div style={{ position: 'relative' }}>
+              <div style={{ position: 'relative' }} ref={originWrapperRef}>
                 <svg style={{ position: 'absolute', left: '16px', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)' }} width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                   <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
                 </svg>
@@ -546,9 +618,27 @@ const HeroSection = ({ isDarkMode, onSearch, isSearching }) => {
                   placeholder="Departing from"
                   value={searchData.origin}
                   disabled={isSearching}
-                  onChange={(e) => setSearchData({...searchData, origin: e.target.value})}
+                  autoComplete="off"
+                  onChange={(e) => handleCityInputChange('origin', e.target.value)}
+                  onFocus={() => { setActiveSuggestionField('origin'); setHighlightedIndex(-1); }}
+                  onKeyDown={(e) => handleSuggestionKeyDown('origin', e)}
                   style={{ paddingLeft: '48px' }}
                 />
+                {activeSuggestionField === 'origin' && getSuggestions('origin').length > 0 && (
+                  <div className="city-suggestion-dropdown">
+                    {getSuggestions('origin').map((city, idx) => (
+                      <button
+                        key={city}
+                        type="button"
+                        className={`city-suggestion-item ${idx === highlightedIndex ? 'is-highlighted' : ''}`}
+                        onMouseDown={(e) => { e.preventDefault(); handleSelectSuggestion('origin', city); }}
+                        onMouseEnter={() => setHighlightedIndex(idx)}
+                      >
+                        {city}
+                      </button>
+                    ))}
+                  </div>
+                )}
               </div>
             </div>
 
@@ -556,7 +646,7 @@ const HeroSection = ({ isDarkMode, onSearch, isSearching }) => {
               <label style={{ display: 'block', fontSize: '12px', fontWeight: '600', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '1px', marginBottom: '8px' }}>
                 To
               </label>
-              <div style={{ position: 'relative' }}>
+              <div style={{ position: 'relative' }} ref={destinationWrapperRef}>
                 <svg style={{ position: 'absolute', left: '16px', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)' }} width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                   <circle cx="12" cy="12" r="10"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
                 </svg>
@@ -566,9 +656,27 @@ const HeroSection = ({ isDarkMode, onSearch, isSearching }) => {
                   placeholder="Going to"
                   value={searchData.destination}
                   disabled={isSearching}
-                  onChange={(e) => setSearchData({...searchData, destination: e.target.value})}
+                  autoComplete="off"
+                  onChange={(e) => handleCityInputChange('destination', e.target.value)}
+                  onFocus={() => { setActiveSuggestionField('destination'); setHighlightedIndex(-1); }}
+                  onKeyDown={(e) => handleSuggestionKeyDown('destination', e)}
                   style={{ paddingLeft: '48px' }}
                 />
+                {activeSuggestionField === 'destination' && getSuggestions('destination').length > 0 && (
+                  <div className="city-suggestion-dropdown">
+                    {getSuggestions('destination').map((city, idx) => (
+                      <button
+                        key={city}
+                        type="button"
+                        className={`city-suggestion-item ${idx === highlightedIndex ? 'is-highlighted' : ''}`}
+                        onMouseDown={(e) => { e.preventDefault(); handleSelectSuggestion('destination', city); }}
+                        onMouseEnter={() => setHighlightedIndex(idx)}
+                      >
+                        {city}
+                      </button>
+                    ))}
+                  </div>
+                )}
               </div>
             </div>
 
@@ -668,6 +776,40 @@ const HeroSection = ({ isDarkMode, onSearch, isSearching }) => {
         .search-submit:disabled { transform: none; }
         .search-spinner { animation: spin 0.85s linear infinite; }
         @keyframes spin { to { transform: rotate(360deg); } }
+
+        /* --- CITY AUTOCOMPLETE DROPDOWN --- */
+        .city-suggestion-dropdown {
+          position: absolute;
+          top: calc(100% + 6px);
+          left: 0;
+          right: 0;
+          background: var(--bg-surface);
+          border: 1px solid var(--border-subtle);
+          border-radius: var(--radius-md, 10px);
+          box-shadow: 0 12px 32px rgba(0,0,0,0.12);
+          z-index: 60;
+          overflow: hidden;
+          max-height: 240px;
+          overflow-y: auto;
+        }
+        .city-suggestion-item {
+          display: block;
+          width: 100%;
+          text-align: left;
+          padding: 10px 16px;
+          background: transparent;
+          border: none;
+          font-size: 14px;
+          font-weight: 600;
+          color: var(--text-main);
+          cursor: pointer;
+          transition: background 0.12s ease;
+        }
+        .city-suggestion-item:hover,
+        .city-suggestion-item.is-highlighted {
+          background: var(--bg-hover, var(--bg-body));
+          color: var(--brand-primary);
+        }
       `}</style>
     </section>
   );
@@ -811,6 +953,13 @@ const HomePage = () => {
                 <div className="modal-overlay" onClick={closeModal}>
                   <div className="modal-content" onClick={(e) => e.stopPropagation()}>
                     <SettingsModule onClose={closeModal} />
+                  </div>
+                </div>
+              )}
+              {activeModal === 'customerSupport' && (
+                <div className="modal-overlay" onClick={closeModal}>
+                  <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+                    <CustomerSupportModule onClose={closeModal} />
                   </div>
                 </div>
               )}
@@ -976,6 +1125,17 @@ const GlobalStyles = ({ isDarkMode }) => (
     }
     .horizontal-scroll::-webkit-scrollbar { height: 6px; }
     .horizontal-scroll-inner { display: flex; gap: 16px; min-width: min-content; }
+
+    /* Fix: the native date input's calendar-icon glyph (the clickable icon
+       that opens the date picker) renders as a dark glyph by default, which
+       is invisible against a dark background. Inverting it to white in
+       dark mode keeps the calendar icon itself visible. The popup calendar
+       grid is browser-drawn and outside CSS's reach, but that part wasn't
+       the reported issue. */
+    body.dark-mode input[type="date"]::-webkit-calendar-picker-indicator {
+      filter: invert(1);
+      cursor: pointer;
+    }
   `}</style>
 );
 

@@ -61,10 +61,15 @@ export const TicketsModule = () => {
         setIsLoading(false);
     }, [user?.id]);
 
-    // Trigger fetch on mount or when user ID changes
+    // Trigger fetch on mount or when user ID changes. Guests have no user.id
+    // to fetch against, so we don't show a loading spinner that would never
+    // resolve — vaultData simply stays empty and TicketVault renders its
+    // empty state (guests just won't have any past tickets to show).
     useEffect(() => {
         if (isAuthenticated && !isBooting) {
             fetchVault();
+        } else if (!isBooting) {
+            setIsLoading(false);
         }
     }, [isAuthenticated, isBooting, fetchVault]);
 
@@ -131,24 +136,9 @@ export const TicketsModule = () => {
         );
     }
 
-    // BRANCH B: The Guest Interceptor
-    if (!isAuthenticated) {
-        return (
-            <div className="tm-viewport tm-center-matrix fade-in">
-                <div className="tm-interceptor-chassis">
-                    <div className="tm-icon-vault">
-                        <Ticket size={48} className="tm-primary-icon" />
-                    </div>
-                    <h2 className="tm-title">Secure Ticket Vault</h2>
-                    <p className="tm-subtitle">Please sign in to access your digital boarding passes, track past journeys, and manage cancellations.</p>
-                    <button className="ayabus-btn tm-action-btn" onClick={handleNavigateToAuth}>
-                        <LogIn size={18} />
-                        <span>Sign In / Register</span>
-                    </button>
-                </div>
-            </div>
-        );
-    }
+    // Guests can view this module (no sign-in wall) — tickets booked without
+    // an account simply won't appear in vaultData, since they were never
+    // tied to a user.id. TicketVault's own empty state covers that case.
 
     // ========================================================================
     // 6. RENDER PAYLOAD (The Sovereign Dashboard)

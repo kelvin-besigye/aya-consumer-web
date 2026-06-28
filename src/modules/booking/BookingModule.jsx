@@ -59,6 +59,45 @@ export const Booking = ({ initialSearchParams, onSearchComplete }) => {
   const [manifest, setManifest] = useState([]);
   const [totalPrice, setTotalPrice] = useState(0);
 
+  // Steps 2-4 (Detail, Seats, Checkout) render inside a full-screen overlay,
+  // separate from the Step 1 results feed which stays on the homepage.
+  const [isOverlayOpen, setIsOverlayOpen] = useState(false);
+  const [showCloseConfirm, setShowCloseConfirm] = useState(false);
+
+  // Lock background scroll while the overlay is open, and let Escape
+  // trigger the same close-confirmation flow as the X button.
+  useEffect(() => {
+    if (!isOverlayOpen) return;
+
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+
+    const handleKeyDown = (e) => {
+      if (e.key !== 'Escape') return;
+      if (showCloseConfirm) {
+        setShowCloseConfirm(false);
+        return;
+      }
+      const hasProgress = currentStep >= 2 && (manifest.length > 0 || currentStep >= 3);
+      if (hasProgress) {
+        setShowCloseConfirm(true);
+      } else {
+        setIsOverlayOpen(false);
+        setCurrentStep(1);
+        setSelectedRoute(null);
+        setBookedSeats([]);
+        setManifest([]);
+        setTotalPrice(0);
+      }
+    };
+    document.addEventListener('keydown', handleKeyDown);
+
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [isOverlayOpen, showCloseConfirm, currentStep, manifest.length]);
+
   // Keep latest callback in a ref so useCallback(fetchRoutes, []) is stable
   // but we still call the freshest onSearchComplete when a fetch resolves.
   const onSearchCompleteRef = useRef(onSearchComplete);
@@ -148,9 +187,13 @@ export const Booking = ({ initialSearchParams, onSearchComplete }) => {
   // FUNNEL NAVIGATION
   // =========================================================================
   const jumpToStep = (targetStep) => {
+    if (targetStep === 1) {
+      // Step 1 lives outside the overlay — going back to it means closing.
+      closeOverlay();
+      return;
+    }
     if (targetStep < currentStep) {
       setCurrentStep(targetStep);
-      window.scrollTo({ top: 0, behavior: 'smooth' });
     }
   };
 
@@ -160,11 +203,35 @@ export const Booking = ({ initialSearchParams, onSearchComplete }) => {
     setManifest([]);
     setTotalPrice(0);
     setCurrentStep(2);
-    window.scrollTo({ top: 0, behavior: 'smooth' });
+    setIsOverlayOpen(true);
   };
 
-  const proceedToSeats    = () => { setCurrentStep(3); window.scrollTo({ top: 0, behavior: 'smooth' }); };
-  const proceedToCheckout = () => { setCurrentStep(4); window.scrollTo({ top: 0, behavior: 'smooth' }); };
+  const proceedToSeats    = () => { setCurrentStep(3); };
+  const proceedToCheckout = () => { setCurrentStep(4); };
+
+  // The X button: only nag with a confirmation if there's real progress to
+  // lose (a route was picked, or seats/details were entered). A bare click
+  // into Step 2 with nothing chosen yet can close immediately.
+  const requestCloseOverlay = () => {
+    const hasProgress = currentStep >= 2 && (manifest.length > 0 || currentStep >= 3);
+    if (hasProgress) {
+      setShowCloseConfirm(true);
+    } else {
+      closeOverlay();
+    }
+  };
+
+  const closeOverlay = () => {
+    setIsOverlayOpen(false);
+    setShowCloseConfirm(false);
+    setCurrentStep(1);
+    setSelectedRoute(null);
+    setBookedSeats([]);
+    setManifest([]);
+    setTotalPrice(0);
+  };
+
+  const cancelCloseOverlay = () => setShowCloseConfirm(false);
 
   const handleModifySearch = (newParams) => {
     if (newParams) {
@@ -176,8 +243,12 @@ export const Booking = ({ initialSearchParams, onSearchComplete }) => {
     setCurrentStep(1);
   };
 
-  const handleCompleteBooking = (ticketData) => {
+  const handleCompleteBooking = async (ticketData) => {
     console.log('Booking Complete! Payload:', ticketData);
+    const result = await bookingQueries.saveBooking(selectedRoute, manifest, ticketData, totalPrice);
+    if (!result.success) {
+      console.error('[BookingModule] Failed to persist booking:', result.error);
+    }
   };
 
   // =========================================================================
@@ -226,50 +297,88 @@ export const Booking = ({ initialSearchParams, onSearchComplete }) => {
   // =========================================================================
   return (
     <div className="bk-chassis">
-      {currentStep < 5 && renderStepper()}
-
-      <div className="bk-view-vault" key={currentStep}>
-        {currentStep === 1 && (
-          <Step1_SearchFeed
-            routes={availableRoutes}
-            isLoading={isLoadingRoutes}
-            searchParams={searchParams}
-            onSelectRoute={proceedToDetail}
-            onModifySearch={handleModifySearch}
-          />
-        )}
-
-        {currentStep === 2 && (
-          <Step2_RouteDetail
-            route={selectedRoute}
-            onBack={() => jumpToStep(1)}
-            onProceed={proceedToSeats}
-          />
-        )}
-
-        {currentStep === 3 && (
-          <Step3_SeatVault
-            route={selectedRoute}
-            bookedSeats={bookedSeats}
-            manifest={manifest}
-            onToggleSeat={handleToggleSeat}
-            onUpdatePassenger={handleUpdatePassenger}
-            totalPrice={totalPrice}
-            onBack={() => jumpToStep(2)}
-            onProceed={proceedToCheckout}
-          />
-        )}
-
-        {currentStep === 4 && (
-          <Step4_Checkout
-            route={selectedRoute}
-            manifest={manifest}
-            totalPrice={totalPrice}
-            onBack={() => jumpToStep(3)}
-            onCompleteBooking={handleCompleteBooking}
-          />
-        )}
+      {/* Step 1 stays inline on the homepage — this never enters the overlay. */}
+      <div className="bk-view-vault">
+        <Step1_SearchFeed
+          routes={availableRoutes}
+          isLoading={isLoadingRoutes}
+          searchParams={searchParams}
+          onSelectRoute={proceedToDetail}
+          onModifySearch={handleModifySearch}
+        />
       </div>
+
+      {/* Steps 2-4 render inside a full-screen overlay, separate from the
+          crowded homepage, per product decision. */}
+      {isOverlayOpen && (
+        <div className="bk-overlay" role="dialog" aria-modal="true" aria-label="Complete your booking">
+          <div className="bk-overlay-chrome">
+            {currentStep < 5 && renderStepper()}
+            <button
+              type="button"
+              className="bk-overlay-close"
+              onClick={requestCloseOverlay}
+              aria-label="Close booking"
+            >
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <line x1="18" y1="6" x2="6" y2="18" />
+                <line x1="6" y1="6" x2="18" y2="18" />
+              </svg>
+            </button>
+          </div>
+
+          <div className="bk-overlay-body" key={currentStep}>
+            {currentStep === 2 && (
+              <Step2_RouteDetail
+                route={selectedRoute}
+                onBack={() => jumpToStep(1)}
+                onProceed={proceedToSeats}
+              />
+            )}
+
+            {currentStep === 3 && (
+              <Step3_SeatVault
+                route={selectedRoute}
+                bookedSeats={bookedSeats}
+                manifest={manifest}
+                onToggleSeat={handleToggleSeat}
+                onUpdatePassenger={handleUpdatePassenger}
+                totalPrice={totalPrice}
+                onBack={() => jumpToStep(2)}
+                onProceed={proceedToCheckout}
+              />
+            )}
+
+            {currentStep === 4 && (
+              <Step4_Checkout
+                route={selectedRoute}
+                manifest={manifest}
+                totalPrice={totalPrice}
+                onBack={() => jumpToStep(3)}
+                onCompleteBooking={handleCompleteBooking}
+              />
+            )}
+          </div>
+
+          {/* Close confirmation — only shown if there's real progress to lose. */}
+          {showCloseConfirm && (
+            <div className="bk-confirm-overlay" onClick={cancelCloseOverlay}>
+              <div className="bk-confirm-card" onClick={(e) => e.stopPropagation()}>
+                <h3>Quit this booking?</h3>
+                <p>You'll lose your seat selection and any details you've entered so far.</p>
+                <div className="bk-confirm-actions">
+                  <button className="ayabus-btn-ghost" onClick={cancelCloseOverlay}>
+                    Keep Booking
+                  </button>
+                  <button className="ayabus-btn bk-confirm-quit" onClick={closeOverlay}>
+                    Quit Booking
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
 
       <style>{`
         .bk-chassis {
@@ -332,6 +441,121 @@ export const Booking = ({ initialSearchParams, onSearchComplete }) => {
         }
         @media (max-width: 768px) {
           .hide-on-mobile { display: none !important; }
+        }
+
+        /* ============================================================
+           FULL-SCREEN BOOKING OVERLAY (Steps 2-4)
+           ============================================================ */
+        .bk-overlay {
+          position: fixed;
+          inset: 0;
+          z-index: 1000;
+          background: var(--bg-canvas);
+          display: flex;
+          flex-direction: column;
+          animation: overlayFadeIn 0.25s cubic-bezier(0.16, 1, 0.3, 1) both;
+        }
+        @keyframes overlayFadeIn {
+          from { opacity: 0; }
+          to   { opacity: 1; }
+        }
+
+        .bk-overlay-chrome {
+          position: relative;
+          flex-shrink: 0;
+          background: var(--bg-surface);
+          border-bottom: 1px solid var(--border-subtle);
+        }
+        .bk-overlay-chrome .bk-stepper-vault {
+          position: static; /* no longer sticking to a page header behind it */
+          top: auto;
+        }
+
+        .bk-overlay-close {
+          position: absolute;
+          top: 16px;
+          right: 20px;
+          width: 36px;
+          height: 36px;
+          border-radius: 50%;
+          border: 1px solid var(--border-subtle);
+          background: var(--bg-body);
+          color: var(--text-main);
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          cursor: pointer;
+          transition: all 0.2s ease;
+          z-index: 10;
+        }
+        .bk-overlay-close:hover {
+          background: var(--status-error, #EF4444);
+          border-color: var(--status-error, #EF4444);
+          color: #fff;
+          transform: rotate(90deg);
+        }
+
+        .bk-overlay-body {
+          flex: 1;
+          overflow-y: auto;
+          -webkit-overflow-scrolling: touch;
+          width: 100%;
+          display: flex;
+          flex-direction: column;
+          animation: viewFade 0.35s cubic-bezier(0.16, 1, 0.3, 1) both;
+        }
+
+        /* ============================================================
+           CLOSE CONFIRMATION DIALOG
+           ============================================================ */
+        .bk-confirm-overlay {
+          position: fixed;
+          inset: 0;
+          z-index: 1100;
+          background: rgba(0, 0, 0, 0.55);
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          padding: 24px;
+          animation: overlayFadeIn 0.18s ease both;
+        }
+        .bk-confirm-card {
+          background: var(--bg-surface);
+          border: 1px solid var(--border-subtle);
+          border-radius: var(--radius-lg, 16px);
+          padding: 28px;
+          max-width: 360px;
+          width: 100%;
+          box-shadow: 0 24px 60px rgba(0,0,0,0.25);
+          text-align: center;
+        }
+        .bk-confirm-card h3 {
+          margin: 0 0 12px 0;
+          font-size: 20px;
+          font-weight: 800;
+          color: var(--text-main);
+        }
+        .bk-confirm-card p {
+          margin: 0 0 24px 0;
+          font-size: 14px;
+          line-height: 1.5;
+          color: var(--text-muted);
+        }
+        .bk-confirm-actions {
+          display: flex;
+          flex-direction: column;
+          gap: 10px;
+        }
+        .bk-confirm-quit {
+          background: var(--status-error, #EF4444);
+          border-color: var(--status-error, #EF4444);
+        }
+
+        @media (max-width: 600px) {
+          .bk-overlay-close {
+            top: 12px;
+            right: 12px;
+          }
         }
       `}</style>
     </div>

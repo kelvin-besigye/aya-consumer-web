@@ -20,7 +20,7 @@
 import React, { useState, useEffect } from 'react';
 import { 
     ArrowLeft, Clock, MapPin, Star, ShieldAlert, 
-    Briefcase, AlertCircle, CheckCircle2, ChevronRight 
+    Briefcase, AlertCircle, CheckCircle2, ChevronRight, BusFront 
 } from 'lucide-react';
 
 // LIVE WIRES: Services & Atomic Components
@@ -87,9 +87,22 @@ export const Step2_RouteDetail = ({
         }).format(amount);
     };
 
-    const formatTime = (isoString) => {
-        if (!isoString) return "--:--";
-        return new Intl.DateTimeFormat('en-UG', { hour: '2-digit', minute: '2-digit', hour12: true }).format(new Date(isoString));
+    const formatTime = (timeValue) => {
+        if (!timeValue) return "--:--";
+
+        // route.departure_time / arrival_time are stored as Postgres `time`
+        // type, e.g. "07:00:00". new Date("07:00:00") throws "Invalid time
+        // value" in Intl.DateTimeFormat — parse HH:MM directly instead.
+        const match = String(timeValue).match(/^(\d{1,2}):(\d{2})/);
+        if (!match) return "--:--";
+
+        let hours = parseInt(match[1], 10);
+        const minutes = match[2];
+        if (Number.isNaN(hours) || hours < 0 || hours > 23) return "--:--";
+
+        const suffix = hours >= 12 ? 'PM' : 'AM';
+        const displayHours = hours % 12 === 0 ? 12 : hours % 12;
+        return `${displayHours}:${minutes} ${suffix}`;
     };
 
     // ========================================================================

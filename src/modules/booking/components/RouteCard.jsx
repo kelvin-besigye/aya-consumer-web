@@ -83,14 +83,23 @@ export const RouteCard = ({ route, onSelect, currency = 'UGX' }) => {
         }).format(amount);
     };
 
-    const formatTime = (isoString) => {
-        if (!isoString) return "--:--";
-        const date = new Date(isoString);
-        return new Intl.DateTimeFormat('en-UG', {
-            hour: '2-digit',
-            minute: '2-digit',
-            hour12: true
-        }).format(date);
+    const formatTime = (timeValue) => {
+        if (!timeValue) return "--:--";
+
+        // routes.departure_time is stored as Postgres `time` type, e.g. "07:00:00".
+        // new Date("07:00:00") is not reliably parseable (not full ISO-8601),
+        // which throws "Invalid time value" in Intl.DateTimeFormat. Parse the
+        // HH:MM directly instead of going through the Date constructor.
+        const match = String(timeValue).match(/^(\d{1,2}):(\d{2})/);
+        if (!match) return "--:--";
+
+        let hours = parseInt(match[1], 10);
+        const minutes = match[2];
+        if (Number.isNaN(hours) || hours < 0 || hours > 23) return "--:--";
+
+        const suffix = hours >= 12 ? 'PM' : 'AM';
+        const displayHours = hours % 12 === 0 ? 12 : hours % 12;
+        return `${displayHours}:${minutes} ${suffix}`;
     };
 
     // ========================================================================
